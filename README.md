@@ -17,19 +17,6 @@ End-to-end code skeleton for the feasibility study "Hardware-Aware Mixture-of-Ex
 - `scripts/eval_routing.py`: Routing locality/heatmap inspection.
 - `requirements.txt`: Minimal deps.
 
-## 3-day crunch plan
-**Day 1 (dense baseline)**  
-`python -m rft_moe.training.train_dense --batch_size 32 --max_iters 800 --save_path checkpoints/dense_baseline.pt`
-
-**Day 2 (sparse upcycling + sanity MoE)**  
-`python - <<'PY'\nfrom rft_moe.training.upcycle import build_moe_from_dense\nfrom rft_moe.modeling.gpt import GPTConfig\nfrom rft_moe.utils.common import save_checkpoint, get_device\ncfg = GPTConfig(use_moe=True, num_experts=8, moe_top_k=2)\nmoe = build_moe_from_dense('checkpoints/dense_baseline.pt', cfg, device=get_device())\nfrom torch.optim import AdamW\nopt = AdamW(filter(lambda p: p.requires_grad, moe.parameters()), lr=1e-4)\nsave_checkpoint(moe, opt, 'checkpoints/moe_upcycled.pt')\nprint('MoE upcycled checkpoint saved')\nPY`
-
-Or use the helper script:  
-`python -m scripts.upcycle_moe --dense_ckpt checkpoints/dense_baseline.pt --save_path checkpoints/moe_upcycled.pt`
-
-**Day 3 (router RFT with hardware-aware reward)**  
-`python -m rft_moe.training.train_rft --dense_ckpt checkpoints/dense_baseline.pt --batch_size 8 --rollout_steps 128 --ppo_epochs 2 --max_updates 200`
-
 For multi-GPU throughput, wrap the rollout_fn/update_fn with `rft_moe.training.distributed.learner_loop` to run 4 actors (GPUs 1-4) and a learner (GPU0).
 
 ### Monitoring with MLflow
