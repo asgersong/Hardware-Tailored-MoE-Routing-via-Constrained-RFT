@@ -1,4 +1,4 @@
-# Hardware-Tailored-MoE-Routing-via-Constrained-RFT
+# Accelerating LLMs with Hardware-Tailored MoE Routing via Constrained RFT
 
 End-to-end code skeleton for the feasibility study "Hardware-Aware Mixture-of-Experts Routing via Constrained Reinforcement Fine-Tuning." The repo contains:
 - Tiny GPT-style LM (dense baseline) and MoE variant with upcycled experts.
