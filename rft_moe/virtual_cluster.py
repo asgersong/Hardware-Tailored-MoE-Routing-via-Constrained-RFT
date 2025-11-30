@@ -1,22 +1,38 @@
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
 
+def _env_float(name: str, default: float) -> float:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+
 @dataclass
 class VirtualClusterConfig:
     num_experts: int = 8
     num_nodes: int = 2
-    intra_node_latency: float = 0.05
-    inter_node_latency: float = 2.5
-    compute_cost: float = 1.0
-    load_penalty_gamma: float = 0.001
+    intra_node_latency: float = _env_float("VIRTUAL_CLUSTER_INTRA_NODE", 0.05)
+    inter_node_latency: float = _env_float("VIRTUAL_CLUSTER_INTER_NODE", 5.0)
+    compute_cost: float = _env_float("VIRTUAL_CLUSTER_COMPUTE_COST", 1.0)
+    load_penalty_gamma: float = _env_float("VIRTUAL_CLUSTER_LOAD_PENALTY", 0.0)
 
 
 class VirtualClusterEnv:
     """
     Lightweight latency simulator used as the reward model.
+    Env vars for quick sweeps:
+      VIRTUAL_CLUSTER_INTRA_NODE
+      VIRTUAL_CLUSTER_INTER_NODE
+      VIRTUAL_CLUSTER_COMPUTE_COST
+      VIRTUAL_CLUSTER_LOAD_PENALTY
     """
 
     def __init__(self, config: Optional[VirtualClusterConfig] = None):
@@ -58,4 +74,3 @@ class VirtualClusterEnv:
 
     def reward(self, token_nodes: torch.Tensor, selected_experts: torch.Tensor) -> torch.Tensor:
         return -self.compute_latency(token_nodes, selected_experts)
-

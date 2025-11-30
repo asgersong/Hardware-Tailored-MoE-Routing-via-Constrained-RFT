@@ -34,6 +34,7 @@ class RolloutSample:
     rewards: torch.Tensor
     values: torch.Tensor
     quality: torch.Tensor
+    latency: torch.Tensor
 
 
 def parse_args():
@@ -53,6 +54,7 @@ def parse_args():
     parser.add_argument("--tokenizer", type=str, default="gpt2")
     parser.add_argument("--num_samples", type=int, default=20000)
     parser.add_argument("--save_path", type=str, default=None, help="Optional path to save RFT checkpoint.")
+    parser.add_argument("--fixed_lambda", action="store_true", help="If set, keep lambda constant at lambda_quality (disable RCPO updates).")
     parser.add_argument("--mlflow", action="store_true", help="Enable MLflow logging if installed.")
     parser.add_argument("--mlflow_tracking_uri", type=str, default=None)
     parser.add_argument("--mlflow_experiment", type=str, default="rft-moe")
@@ -91,7 +93,15 @@ def collect_rollouts(
 
         model.eval()
         with torch.no_grad():
-            logits, _, router_outputs = model(x, targets=None, return_router_outputs=True)
+            token_nodes = torch.randint(
+                low=0,
+                high=cluster.config.num_nodes,
+                size=(x.size(0), x.size(1)),
+                device=device,
+            )
+            logits, _, router_outputs = model(
+                x, targets=None, token_nodes=token_nodes, return_router_outputs=True
+            )
         if not router_outputs:
             raise RuntimeError("Model returned no router outputs; ensure use_moe=True and moe_every>0.")
         router_out = router_outputs[0]
@@ -105,12 +115,6 @@ def collect_rollouts(
             reduction="none",
         ).view(x.size(0), eff_len)
         selected = router_out.selected_experts[:, :eff_len, :]
-        token_nodes = torch.randint(
-            low=0,
-            high=cluster.config.num_nodes,
-            size=(x.size(0), eff_len),
-            device=device,
-        )
         latency = cluster.compute_latency(
             token_nodes=token_nodes.reshape(-1),
             selected_experts=selected.reshape(-1, selected.size(-1)),
@@ -126,6 +130,7 @@ def collect_rollouts(
                 rewards=rewards.detach(),
                 values=router_out.value[:, :eff_len].detach(),
                 quality=ce.detach(),
+                latency=latency.detach(),
             )
         )
     return rollouts
@@ -176,11 +181,13 @@ def main():
     )
     dataloader = build_dataloader(tokens, block_size=args.block_size, batch_size=args.batch_size)
 
+    cluster = VirtualClusterEnv(VirtualClusterConfig(num_experts=args.num_experts))
     moe_config = GPTConfig(
         vocab_size=vocab_size,
         block_size=args.block_size,
         use_moe=True,
         num_experts=args.num_experts,
+        num_nodes=cluster.config.num_nodes,
         moe_top_k=args.moe_top_k,
     )
     model = build_moe_from_dense(args.dense_ckpt, moe_config, device=device)
@@ -193,7 +200,6 @@ def main():
         rcpo_lambda=args.lambda_quality,
     )
     lambda_quality = torch.tensor(rft_cfg.rcpo_lambda, device=device)
-    cluster = VirtualClusterEnv(VirtualClusterConfig(num_experts=args.num_experts))
 
     for update_idx in range(args.max_updates):
         rollouts = collect_rollouts(model, dataloader, cluster, rft_cfg, device, lambda_quality)
@@ -202,7 +208,10 @@ def main():
         for _ in range(rft_cfg.ppo_epochs):
             for batch in rollouts:
                 logits, _, router_outputs = model(
-                    batch.input_ids.to(device), targets=None, return_router_outputs=True
+                    batch.input_ids.to(device),
+                    targets=None,
+                    token_nodes=batch.token_nodes.to(device),
+                    return_router_outputs=True,
                 )
                 if not router_outputs:
                     raise RuntimeError("Model returned no router outputs during training.")
@@ -228,17 +237,20 @@ def main():
 
         avg_reward = torch.cat([b.rewards for b in rollouts], dim=0).mean().item()
         avg_quality = torch.cat([b.quality for b in rollouts], dim=0).mean().item()
-        lambda_quality = update_rcpo_lambda(lambda_quality, torch.tensor(avg_quality, device=device), rft_cfg.quality_epsilon, rft_cfg.rcpo_lr)
+        avg_latency = torch.cat([b.latency for b in rollouts], dim=0).mean().item()
+        if not args.fixed_lambda:
+            lambda_quality = update_rcpo_lambda(lambda_quality, torch.tensor(avg_quality, device=device), rft_cfg.quality_epsilon, rft_cfg.rcpo_lr)
 
         if update_idx % args.log_interval == 0:
             print(
-                f"update {update_idx} | reward {avg_reward:.4f} | quality {avg_quality:.4f} | lambda {lambda_quality.item():.4f}"
+                f"update {update_idx} | reward {avg_reward:.4f} | quality {avg_quality:.4f} | latency {avg_latency:.4f} | lambda {lambda_quality.item():.4f}"
             )
             if mlflow_run:
                 mlflow.log_metrics(
                     {
                         "reward": avg_reward,
                         "quality_ce": avg_quality,
+                        "latency": avg_latency,
                         "lambda_quality": lambda_quality.item(),
                     },
                     step=update_idx,

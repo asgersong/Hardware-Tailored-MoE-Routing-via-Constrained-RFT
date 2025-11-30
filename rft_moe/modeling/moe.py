@@ -36,6 +36,7 @@ class MoELayer(nn.Module):
         self,
         dim: int,
         num_experts: int = 8,
+        num_nodes: int = 2,
         k: int = 2,
         router_init_std: float = 0.02,
         dropout: float = 0.0,
@@ -47,6 +48,7 @@ class MoELayer(nn.Module):
         self.k = k
         self.router = nn.Linear(dim, num_experts, bias=bias)
         self.value_head = nn.Linear(dim, 1, bias=True)
+        self.node_embed = nn.Embedding(num_nodes, dim)
         self.experts = nn.ModuleList(
             [ExpertMLP(dim, dropout=dropout, bias=bias) for _ in range(num_experts)]
         )
@@ -56,10 +58,18 @@ class MoELayer(nn.Module):
             nn.init.zeros_(self.router.bias)
 
     def forward(
-        self, x: torch.Tensor, return_router_outputs: bool = False
+        self,
+        x: torch.Tensor,
+        token_nodes: Optional[torch.Tensor] = None,
+        return_router_outputs: bool = False,
     ) -> Tuple[torch.Tensor, Optional[RouterOutput]]:
         batch, seq, dim = x.shape
-        logits = self.router(x)
+        gate_input = x
+        if token_nodes is not None:
+            # Inject node locality signal into the router/value heads.
+            gate_input = gate_input + self.node_embed(token_nodes)
+
+        logits = self.router(gate_input)
         probs = F.softmax(logits, dim=-1)
         topk_vals, topk_idx = torch.topk(probs, k=self.k, dim=-1)
         log_prob = torch.log(topk_vals + 1e-9).sum(dim=-1)
@@ -85,14 +95,14 @@ class MoELayer(nn.Module):
 
         router_output = None
         if return_router_outputs:
-            value = self.value_head(x).squeeze(-1)
+            value = self.value_head(gate_input).squeeze(-1)
             router_output = RouterOutput(
                 logits=logits,
                 probs=probs,
                 selected_experts=topk_idx,
                 log_prob=log_prob,
                 value=value,
-                hidden=x.detach(),
+                hidden=gate_input.detach(),
             )
         return outputs, router_output
 

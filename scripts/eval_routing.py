@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("--num_batches", type=int, default=10)
     parser.add_argument("--tokenizer", type=str, default="gpt2")
     parser.add_argument("--num_experts", type=int, default=8)
+    parser.add_argument("--num_nodes", type=int, default=2)
     return parser.parse_args()
 
 
@@ -35,18 +36,20 @@ def main():
     tokens, vocab_size = load_tinystories_tokens(tokenizer_name=args.tokenizer, block_size=args.block_size, num_samples=2000)
     dl = build_dataloader(tokens, block_size=args.block_size, batch_size=args.batch_size, shuffle=False)
 
+    cluster = VirtualClusterEnv(
+        VirtualClusterConfig(num_experts=args.num_experts, num_nodes=args.num_nodes)
+    )
     moe_config = GPTConfig(
         vocab_size=vocab_size,
         block_size=args.block_size,
         use_moe=True,
         num_experts=args.num_experts,
+        num_nodes=cluster.config.num_nodes,
     )
     model = GPT(moe_config).to(device)
     ckpt = torch.load(args.model_ckpt, map_location=device)
     model.load_state_dict(ckpt.get("model", ckpt))
     model.eval()
-
-    cluster = VirtualClusterEnv(VirtualClusterConfig(num_experts=args.num_experts))
 
     heatmap = np.zeros((cluster.config.num_nodes, cluster.config.num_nodes), dtype=np.float64)
     total = 0
@@ -55,14 +58,16 @@ def main():
             if idx >= args.num_batches:
                 break
             x = x.to(device)
-            logits, _, routers = model(x, targets=None, return_router_outputs=True)
+            token_nodes = torch.randint(
+                low=0, high=cluster.config.num_nodes, size=(x.size(0), x.size(1)), device=device
+            )
+            logits, _, routers = model(
+                x, targets=None, token_nodes=token_nodes, return_router_outputs=True
+            )
             if not routers:
                 continue
             router = routers[0]
             seq = x.size(1)
-            token_nodes = torch.randint(
-                low=0, high=cluster.config.num_nodes, size=(x.size(0), seq), device=device
-            )
             selected = router.selected_experts  # (B, T, k)
             expert_nodes = cluster.expert_to_node.to(device)[selected]  # (B, T, k)
             for src in range(cluster.config.num_nodes):

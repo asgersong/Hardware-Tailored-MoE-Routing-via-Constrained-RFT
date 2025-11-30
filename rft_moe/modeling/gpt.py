@@ -20,6 +20,7 @@ class GPTConfig:
     moe_every: int = 2
     moe_top_k: int = 2
     num_experts: int = 8
+    num_nodes: int = 2
     router_init_std: float = 0.02
     bias: bool = False
 
@@ -86,6 +87,7 @@ class Block(nn.Module):
             self.mlp = MoELayer(
                 dim=config.n_embd,
                 num_experts=config.num_experts,
+                num_nodes=config.num_nodes,
                 k=config.moe_top_k,
                 router_init_std=config.router_init_std,
                 dropout=config.dropout,
@@ -95,7 +97,10 @@ class Block(nn.Module):
             self.mlp = FeedForward(config)
 
     def forward(
-        self, x: torch.Tensor, return_router_outputs: bool = False
+        self,
+        x: torch.Tensor,
+        token_nodes: Optional[torch.Tensor] = None,
+        return_router_outputs: bool = False,
     ) -> Tuple[torch.Tensor, List[RouterOutput]]:
         router_outputs: List[RouterOutput] = []
         h = self.ln_1(x)
@@ -103,7 +108,9 @@ class Block(nn.Module):
         h = self.ln_2(x)
         residual = x
         if self.use_moe:
-            x, router_out = self.mlp(h, return_router_outputs=return_router_outputs)
+            x, router_out = self.mlp(
+                h, token_nodes=token_nodes, return_router_outputs=return_router_outputs
+            )
             x = residual + x
             if router_out is not None:
                 router_outputs.append(router_out)
@@ -143,6 +150,7 @@ class GPT(nn.Module):
         self,
         idx: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
+        token_nodes: Optional[torch.Tensor] = None,
         return_router_outputs: bool = False,
     ):
         device = idx.device
@@ -156,7 +164,9 @@ class GPT(nn.Module):
 
         all_router_outputs: List[RouterOutput] = []
         for block in self.transformer["h"]:
-            x, router_outputs = block(x, return_router_outputs=return_router_outputs)
+            x, router_outputs = block(
+                x, token_nodes=token_nodes, return_router_outputs=return_router_outputs
+            )
             if router_outputs:
                 all_router_outputs.extend(router_outputs)
 
@@ -192,7 +202,7 @@ class GPT(nn.Module):
 
     def freeze_except_router(self):
         for name, param in self.named_parameters():
-            if ("mlp.router" in name) or ("mlp.value_head" in name):
+            if ("mlp.router" in name) or ("mlp.value_head" in name) or ("mlp.node_embed" in name):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
