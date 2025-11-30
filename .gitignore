@@ -15,6 +15,7 @@ mlruns/
 *.bin
 *.ckpt
 *.log
+diagrams/
 
 # VSCode/IDE/editor noise
 .vscode/
